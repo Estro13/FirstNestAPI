@@ -8,13 +8,14 @@ import {ArticleResponseInterface} from "./types/articleResponse.interface";
 import slugify from "slugify";
 import {UpdateArticleDto} from "./dto/updateArticle.dto";
 import {ArticlesResponseInterface} from "./types/articlesResponse.interface";
+import {FollowEntity} from "../profile/follow.entity";
 
 @Injectable()
 export class ArticleService {
 
     constructor(@InjectRepository(ArticleEntity) private readonly articleRepository: Repository<ArticleEntity>,
-                @InjectRepository(UserEntity) private readonly userRepository: Repository<UserEntity>) {
-    }
+                @InjectRepository(UserEntity) private readonly userRepository: Repository<UserEntity>,
+                @InjectRepository(FollowEntity) private readonly followRepository: Repository<FollowEntity>) { }
 
     async findAllArticles(currentUserId: number, query: any): Promise<ArticlesResponseInterface> {
         const queryBuilder = getRepository(ArticleEntity)
@@ -39,10 +40,8 @@ export class ArticleService {
         if (query.favorited) {
             const author = await this.userRepository.findOne({username: query.favorited}, {relations: ['favorites']});
 
-            console.log(author)
-
             const ids = author.favorites.map((el) => el.id);
-            if(ids.length > 0) {
+            if (ids.length > 0) {
                 queryBuilder.andWhere('articles.authorId IN (:...ids)', {ids});
                 // ми перевіряєм в кожного article(поста) поле author.id і перевіряєм що цей id знаходиться в масиві наших залайканих айдішніків ids. Ця строка зі всіх постів які в нас є в яких author.id знаходиться в масиві тих постів які залайкав цей юзер
             } else {
@@ -59,11 +58,53 @@ export class ArticleService {
         if (query.offset) {
             queryBuilder.offset(query.offset)
         }
-        const articles = await queryBuilder.getMany()
 
-        return {articles, articlesCount};
+        let favoriteIds: number[] = [];
+
+        if (currentUserId) {
+            const currentUser = await this.userRepository.findOne(currentUserId, {relations: ['favorites']})
+            favoriteIds = currentUser.favorites.map((favorite) => favorite.id)
+        }
+        const articles = await queryBuilder.getMany()
+        const articlesWithFavorites = articles.map(article => {
+            const favorited = favoriteIds.includes(article.id);
+            return {...article, favorited};
+        });
+
+        return {articles: articlesWithFavorites, articlesCount};
 
     }
+
+    async getFeed(currentUserId: number, query: any): Promise<ArticlesResponseInterface> {
+
+        const follows = await this.followRepository.find({followerId: currentUserId})
+
+        if(follows.length === 0) {
+            return {articles: [], articlesCount: 0}
+        }
+        const followingUserIds = follows.map((followEntity) => followEntity.followingId)
+
+        const queryBuilder = getRepository(ArticleEntity).createQueryBuilder('articles').leftJoinAndSelect('articles.author', 'author')
+            .where('articles.authorId IN (:...ids)',{ids: followingUserIds})
+
+        queryBuilder.orderBy('articles.createAt', "DESC")
+
+        const articlesCount =  await queryBuilder.getCount()
+
+        if(query.limit) {
+            queryBuilder.limit(query.limit)
+        }
+
+        if(query.offset) {
+            queryBuilder.offset(query.offset )
+        }
+
+        const articles = await queryBuilder.getMany()
+
+        return {articles, articlesCount}
+    }
+
+
 
 
     async createArticle(currentUser: UserEntity, createArticleDto: CreateArticleDto): Promise<ArticleEntity> {
